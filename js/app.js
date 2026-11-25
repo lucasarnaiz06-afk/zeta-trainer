@@ -13,7 +13,7 @@
   const dateTimeFmt = (t) => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
   const solved = (p) => `${P.format(p)} = ${p.ans}`;
-  const modeName = (s) => (s.mode === 'classic' ? 'Classic' : s.mode === 'focus' ? 'Focus' : `Drill ${P.categoryLabel(s.target)}`);
+  const modeName = (s) => (s.mode === 'classic' ? 'Classic' : s.mode === 'focus' ? 'Focus' : `Drill ${A.targetLabel(s.target)}`);
 
   function official(settings) {
     return S.sessions().filter((s) => s.mode === 'classic' && s.standard && s.duration === settings.duration);
@@ -54,7 +54,7 @@
     const opsText = ops.length === 4 ? 'all four operations' : ops.join(', ');
 
     $('drill-btn').hidden = !state.drill;
-    if (state.drill) $('drill-btn').textContent = `Drill ${P.categoryLabel(state.drill)}`;
+    if (state.drill) $('drill-btn').textContent = `Drill ${A.targetLabel(state.drill)}`;
     if (state.mode === 'drill' && !state.drill) state.mode = 'classic';
     document.querySelectorAll('#mode-seg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === state.mode));
 
@@ -74,9 +74,21 @@
         targets.innerHTML = plan.top.map((t) => `<span class="chip">${esc(P.categoryLabel(t.cat))} · ${Math.round(t.p * 100)}%</span>`).join('');
       }
     } else {
-      const hint = P.categoryHint(state.drill);
-      desc.textContent = `${s.duration} seconds of only ${P.categoryLabel(state.drill)} problems${state.drill.startsWith('add') || state.drill.startsWith('sub') ? ` (${hint.charAt(0).toLowerCase() + hint.slice(1)})` : ''}, with extra reps on the ones you're slowest at. Doesn't count as an official score.`;
-      targets.innerHTML = `<span class="chip">${esc(P.categoryLabel(state.drill))}</span>`;
+      const t = state.drill, label = A.targetLabel(t), hint = A.targetHint(t);
+      const lower = hint.charAt(0).toLowerCase() + hint.slice(1);
+      if (t === 'leaks') {
+        const top = A.topLeaks(A.analyze(sessions, s));
+        desc.textContent = top.length
+          ? `${s.duration} seconds on the patterns you lose the most time on. Doesn’t count as an official score. Right now that’s:`
+          : `${s.duration} seconds on your leaks. None stand out yet, so this plays like a classic game until you have more answers.`;
+        targets.innerHTML = top.map((l) => `<span class="chip">${esc(P.traitLabel(l.id))}</span>`).join('');
+      } else {
+        desc.textContent = (t === 'facts'
+          ? `${s.duration} seconds replaying the individual problems you're slowest at.`
+          : `${s.duration} seconds of only ${label} problems${t.includes('/') || /^(add|sub)/.test(t) ? ` (${lower})` : ''}, with extra reps on the ones you're slowest at.`)
+          + ' Doesn’t count as an official score.';
+        targets.innerHTML = `<span class="chip">${esc(label)}</span>`;
+      }
     }
 
     const off = official(s);
@@ -112,7 +124,7 @@
       an, plan: mode === 'focus' ? A.focusPlan(an, settings) : null,
       problems: [], recent: [], cur: null,
     };
-    $('g-mode').textContent = mode === 'classic' ? '' : mode === 'focus' ? 'Focus' : `Drill ${P.categoryLabel(game.target)}`;
+    $('g-mode').textContent = mode === 'classic' ? '' : mode === 'focus' ? 'Focus' : `Drill ${A.targetLabel(game.target)}`;
     $('g-score').textContent = '0';
     show('game');
     nextProblem();
@@ -205,10 +217,21 @@
           <div class="stat"><div class="v ${d2 >= 0 ? 'delta-up' : 'delta-down'}">${d2 >= 0 ? '+' : ''}${d2}</div><div class="l">vs best (${best})</div></div>`;
       } else badge = `<div class="badge">First official game</div>`;
     } else if (s.mode !== 'classic') {
-      const cats = {};
-      s.problems.forEach((p) => { const c = P.category(p); (cats[c] = cats[c] || []).push(p.ms); });
-      const rows = Object.entries(cats).sort((a, b) => b[1].length - a[1].length).slice(0, 3);
+      // Leak drills compare against the leak patterns themselves; other modes against problem types.
+      const byLeak = s.target === 'leaks' || (s.target && s.target.includes('/'));
+      const groups = {};
+      s.problems.forEach((p) => {
+        const keys = byLeak ? P.traits(p).filter((id) => (s.target === 'leaks' ? hist.leakMap[id] && A.isLeak(hist.leakMap[id]) : id === s.target)) : [P.category(p)];
+        keys.forEach((k) => (groups[k] = groups[k] || []).push(p.ms));
+      });
+      const rows = Object.entries(groups).sort((a, b) => b[1].length - a[1].length).slice(0, 3);
       compare = rows.map(([c, t]) => {
+        if (byLeak) {
+          const l = hist.leakMap[c], usual = l ? l.time : NaN, now = Math.exp(A.mean(t.map(Math.log)));
+          const better = Number.isFinite(usual) && now < usual;
+          return `<div class="stat"><div class="v ${Number.isFinite(usual) ? (better ? 'delta-up' : 'delta-down') : ''}">${sec(now, 1)}</div>
+            <div class="l">${esc(P.traitLabel(c))} · usually ${sec(usual, 1)}</div></div>`;
+        }
         const usual = hist.catMap[c] && hist.catMap[c].n ? hist.catMap[c].est : NaN;
         const now = Math.exp(A.mean(t.map(Math.log)));
         const better = Number.isFinite(usual) && now < usual;
@@ -256,7 +279,7 @@
   }
 
   /* ---------- analysis ---------- */
-  let analysisShowAll = false, heatOp = 'mul';
+  let analysisShowAll = false, leaksShowAll = false, heatOp = 'mul';
 
   function renderAnalysis() {
     const settings = S.settings();
@@ -288,6 +311,24 @@
       </tr>`;
     }).join('');
 
+    const leaks = an.leaks.filter(A.isLeak);
+    const leaksShown = leaksShowAll ? leaks : leaks.slice(0, 10);
+    const leakRows = leaksShown.map((l, i) => `
+      <tr class="click" data-target="${l.id}" title="Click to drill ${esc(P.traitLabel(l.id))}">
+        <td class="m">${i + 1}</td>
+        <td><span class="q">${esc(P.traitLabel(l.id))}</span>${l.sure < 3 ? ' <span class="tag" title="Could still be chance. A few more answers will settle it.">possible</span>' : ''}<br><span class="hint-sm">${l.example ? `slowest: ${esc(solved(l.example))} · ${sec(l.exampleTime, 1)}` : esc(P.traitHint(l.id))}</span></td>
+        <td class="r">${sec(l.time)}</td>
+        <td class="r delta-down" style="font-size:13px">+${sec(l.excess)}</td>
+        <td class="r m hide-sm">${l.n}</td>
+      </tr>`).join('');
+    const leakPanel = leaks.length ? `
+          <table class="list">
+            <tr><th></th><th>Pattern</th><th class="r">Typical</th><th class="r">Lost each</th><th class="r hide-sm">Seen</th></tr>
+            ${leakRows}
+          </table>
+          <div class="actions">${leaks.length > 10 ? `<button class="ghost" id="toggle-leaks">${leaksShowAll ? 'Show fewer' : `Show all ${leaks.length}`}</button>` : ''}<span class="note">Click a row to drill that pattern.</span></div>`
+      : `<p class="note">Nothing stands out yet. A pattern shows up here once you've answered it at least 5 times and it's clearly slower than the rest of its type.</p>`;
+
     const factRows = an.facts.slice(0, 12).map((f) => `
       <tr><td class="q">${esc(solved(f.p))}</td><td class="m hide-sm">${esc(P.categoryLabel(f.cat))}</td>
       <td class="r">${sec(f.recent)}</td><td class="r m">${f.n}×</td></tr>`).join('');
@@ -310,6 +351,15 @@
           ${cats.length > 12 ? `<div class="actions"><button class="ghost" id="toggle-all">${analysisShowAll ? 'Show fewer' : `Show all ${cats.length}`}</button><span class="note">Click a row to drill that type.</span></div>` : '<p class="note">Click a row to drill that type.</p>'}
         </div>
 
+        <h2>Leaks</h2>
+        <div class="panel">
+          <div class="head" style="margin-bottom:10px">
+            <span class="note">Patterns inside a type that are slower than the rest of it, which the type's average hides. "Lost each" is the extra time per problem compared with the rest of its type.</span>
+            ${leaks.length ? '<button class="ghost" id="drill-leaks">Drill top leaks</button>' : ''}
+          </div>
+          ${leakPanel}
+        </div>
+
         <h2>Times by factor</h2>
         <div class="panel">
           <div class="head" style="margin-bottom:10px">
@@ -321,6 +371,10 @@
 
         <h2>Slowest individual problems</h2>
         <div class="panel">
+          <div class="head" style="margin-bottom:10px">
+            <span class="note">Ranked by your last three tries at each problem.</span>
+            <button class="ghost" id="drill-facts">Drill these</button>
+          </div>
           <table class="list"><tr><th>Problem</th><th class="hide-sm">Type</th><th class="r">Recent avg</th><th class="r">Seen</th></tr>${factRows}</table>
         </div>
       </div>`;
@@ -329,9 +383,12 @@
       const c = shown[+el.dataset.i];
       spark(el, c.chunks.length >= 2 ? c.chunks : [], { color: 'var(--muted)', height: 20 });
     });
-    root.querySelectorAll('tr[data-cat]').forEach((tr) => tr.addEventListener('click', () => {
-      state.drill = tr.dataset.cat; state.mode = 'drill'; go('play');
-    }));
+    const drill = (t) => { state.drill = t; state.mode = 'drill'; go('play'); };
+    root.querySelectorAll('tr[data-cat]').forEach((tr) => tr.addEventListener('click', () => drill(tr.dataset.cat)));
+    root.querySelectorAll('tr[data-target]').forEach((tr) => tr.addEventListener('click', () => drill(tr.dataset.target)));
+    if ($('drill-leaks')) $('drill-leaks').onclick = () => drill('leaks');
+    $('drill-facts').onclick = () => drill('facts');
+    if ($('toggle-leaks')) $('toggle-leaks').onclick = () => { leaksShowAll = !leaksShowAll; renderAnalysis(); };
     $('train-weak').onclick = () => { state.mode = 'focus'; go('play'); };
     if ($('toggle-all')) $('toggle-all').onclick = () => { analysisShowAll = !analysisShowAll; renderAnalysis(); };
     $('heat-tabs').addEventListener('click', (e) => {

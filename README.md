@@ -23,7 +23,7 @@ There are three modes:
 
 - **Classic** uses Zetamac's default game: addition with 2–100, subtraction as the reverse of addition, multiplication with 2–12 × 2–100, division as the reverse of multiplication, and 120 seconds. Only these games count toward your official score history.
 - **Focus** gives you more of the problem types you're slow at, based on your past games. It needs a few classic games first before it has anything to go on.
-- **Drill** practises one problem type, such as × 7 or subtraction with borrowing. Start a drill by clicking a row on the Analysis page.
+- **Drill** practises one thing: a problem type (× 7), a leak (× 7 with numbers ending in 8), a mix of your worst leaks, or your slowest individual problems. Start one from the Analysis page.
 
 ## What it tracks
 
@@ -35,9 +35,10 @@ Answers are grouped into problem types:
 - **Division**: one type per divisor, ÷2 through ÷12.
 
 - **Analysis** ranks these types slowest first. It also has a heatmap of your × and ÷ times and a list of the individual problems you're slowest on.
+- **Leaks** are narrower patterns inside a type that are slower than the rest of it, so the type's average hides them. Examples: × 7 when the other number ends in 8, ÷ 8 when the answer is in the 40s, or subtracting a number ending in 7 from one ending in 3. Each leak shows how much time it costs you per problem. A leak tagged *possible* could still be chance, and a few more games will confirm it or clear it. Leaks are measured from classic and focus games only, because drills repeat a small set of problems and make you briefly faster at those.
 - **Progress** shows your score over time with a 10-game average, your seconds per problem for each operation, and how much each problem type has improved.
 
-Typical times put more weight on recent answers, so they follow how fast you are now rather than your all-time average. Focus mode picks problem types roughly in proportion to how slow you are at them. 15% of its problems stay random, so the other types keep getting measured.
+Typical times put more weight on recent answers, so they follow how fast you are now rather than your all-time average. Focus mode picks problem types roughly in proportion to how slow you are at them. Within a type, it leans toward that type's leaks and replays specific problems you've been slow on. 15% of its problems stay random, so the other types keep getting measured.
 
 ## Your data
 

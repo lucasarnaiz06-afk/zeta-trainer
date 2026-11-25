@@ -8,6 +8,9 @@
   const PRIOR_WEIGHT = 3;        // pseudo-observations pulling sparse categories toward their operation's mean
   const BETA = 2.5;              // how aggressively Focus mode leans into slow categories
   const EXPLORE = 0.15;          // share of Focus problems drawn uniformly across categories
+  const LEAK_HALF_LIFE = 150;    // patterns are rarer than categories, so leaks look further back
+  const LEAK_PRIOR = 10;         // pseudo-observations at "same speed as the rest of its type" (tuned on simulated histories)
+  const LEAK_MIN_N = 5;          // a pattern needs this many answers before it's shown as a leak
 
   const log = (ms) => Math.log(Math.max(150, Math.min(CAP_MS, ms)));
   const mean = (a) => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : NaN);
@@ -39,7 +42,7 @@
   /* Full analysis of all recorded problems. */
   function analyze(sessions, settings) {
     const probs = [];
-    sessions.forEach((s, si) => s.problems.forEach((p) => probs.push(Object.assign({ si, at: s.at }, p))));
+    sessions.forEach((s, si) => s.problems.forEach((p) => probs.push(Object.assign({ si, at: s.at, drill: s.mode === 'drill' }, p))));
 
     const globalLog = probs.length ? mean(probs.map((p) => log(p.ms))) : Math.log(3000);
 
@@ -89,6 +92,9 @@
       };
     });
     facts.sort((x, y) => y.score - x.score);
+    facts.forEach((f) => { f.traits = P.traits(f.p); });
+
+    const leaks = findLeaks(byCat, catMap, facts);
 
     // × and ÷ heatmaps: small factor × bucket of the large operand.
     const heat = {};
@@ -103,7 +109,59 @@
       heat[op] = cells;
     }
 
-    return { probs, globalLog, typical: Math.exp(globalLog), ops, cats, catMap, facts, factMap, heat };
+    return { probs, globalLog, typical: Math.exp(globalLog), ops, cats, catMap, facts, factMap, heat, leaks, leakMap: Object.fromEntries(leaks.map((l) => [l.id, l])) };
+  }
+
+  /* Leaks: patterns inside a type that are slower than the rest of that type.
+   * Each answer is compared with its own type's typical time over the same window (a log ratio), so a pattern
+   * spanning several types (e.g. "× numbers ending in 7") isn't skewed by which types it happens to include.
+   * The average ratio is shrunk toward "no difference", so a pattern needs repeated slow answers to stand out.
+   * Drill answers are left out: a drill repeats a handful of problems, which makes you briefly fast at exactly those
+   * and would make the rest of the type look like leaks. Leaks are measured in game conditions (classic and focus). */
+  function findLeaks(byCat, catMap, facts) {
+    const agg = {};
+    let noise = 0, noiseN = 0;
+    for (const [cat, all] of Object.entries(byCat)) {
+      const list = all.filter((p) => !p.drill);
+      if (!list.length || !catMap[cat]) continue;
+      const w = list.map((_, i) => Math.pow(0.5, (list.length - 1 - i) / LEAK_HALF_LIFE));
+      const sw = w.reduce((s, v) => s + v, 0);
+      const base = list.reduce((s, p, i) => s + w[i] * log(p.ms), 0) / sw;
+      const now = Math.log(estimate(list.map((p) => p.ms), base));
+      list.forEach((p, i) => {
+        const r = log(p.ms) - base;
+        noise += r * r; noiseN++;
+        for (const id of P.traits(p)) {
+          const a = agg[id] || (agg[id] = { id, n: 0, sw: 0, sr: 0, sb: 0 });
+          a.n++; a.sw += w[i]; a.sr += w[i] * r; a.sb += w[i] * now;
+        }
+      });
+    }
+    // `sure` is how many standard errors the pattern sits above the rest of its type, given your answer-to-answer noise.
+    const sigma2 = noiseN ? noise / noiseN : 0.1;
+    const seen = Object.values(agg).filter((a) => a.n >= LEAK_MIN_N);
+    const out = [];
+    for (const a of seen) {
+      const tp = P.traitParts(a.id);
+      const shrunk = a.sr / (a.sw + LEAK_PRIOR);
+      const sure = (a.sr / a.sw) / Math.sqrt(sigma2 / a.sw);
+      const baseTime = Math.exp(a.sb / a.sw);           // typical time of the types this pattern falls in, now
+      const time = baseTime * Math.exp(shrunk);
+      const example = facts.find((f) => f.traits.includes(a.id));
+      out.push({
+        id: a.id, op: tp.op, cat: tp.cat, n: a.n,
+        ratio: Math.exp(shrunk), sure, time, baseTime, excess: time - baseTime,
+        example: example ? example.p : null, exampleTime: example ? example.recent : NaN,
+      });
+    }
+    return out.sort((x, y) => y.excess - x.excess);
+  }
+
+  /* Leaks worth showing and training: at least 10% slower than the rest of their type, and unlikely to be luck.
+   * On simulated histories, sure >= 3 was almost always a real leak, 2-3 about half the time, under 2 mostly noise. */
+  const isLeak = (l) => l.ratio >= 1.1 && l.sure >= 2;
+  function topLeaks(A, k = 8) {
+    return A.leaks.filter(isLeak).slice(0, k);
   }
 
   /* ---------- Focus mode ---------- */
@@ -135,11 +193,19 @@
     const c = A.catMap[cat];
     const [op, k] = cat.split('.');
 
-    if (c && c.n >= 5 && Math.random() < 0.3) {
+    const r = Math.random();
+    if (c && c.n >= 5 && r < 0.3) {
       const slow = A.facts.filter((f) => f.cat === cat && f.score > c.est && inRange(f.p, settings)).slice(0, 12);
-      if (slow.length) {
-        const f = weightedPick(slow, slow.map((f) => f.recent));
-        return { op: f.p.op, a: f.p.a, b: f.p.b, ans: f.p.ans };
+      if (slow.length) return replay(weightedPick(slow, slow.map((f) => f.recent)));
+    }
+
+    // Lean into this type's leaks: patterns inside it that are slower than the rest of it.
+    if (r >= 0.3 && r < 0.65) {
+      const cand = A.leaks.filter((l) => l.op === op && (l.cat === cat || !l.cat) && isLeak(l));
+      if (cand.length) {
+        const l = weightedPick(cand, cand.map((l) => l.ratio - 1));
+        const p = P.generateTrait(settings, l.id, cat);
+        if (p) return p;
       }
     }
 
@@ -167,14 +233,63 @@
     return x >= ra[0] && x <= ra[1] && y >= rb[0] && y <= rb[1];
   }
 
-  /* Drill a single category (picked from the Analysis view). */
-  function nextDrill(cat, A, settings, recentKeys) {
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const p = pickInCategory(cat, A, settings);
-      if (!recentKeys.includes(P.factKey(p))) return p;
-    }
-    return P.generateIn(settings, cat);
+  const replay = (f) => ({ op: f.p.op, a: f.p.a, b: f.p.b, ans: f.p.ans });
+
+  /* ---------- Drill targets ----------
+   * A drill target is one of: a category ("mul.7"), a trait ("mul.7/o8"),
+   * "leaks" (a mix of your worst leaks) or "facts" (your slowest individual problems). */
+  const isTrait = (t) => t.includes('/');
+
+  function targetLabel(t) {
+    if (t === 'leaks') return 'top leaks';
+    if (t === 'facts') return 'slowest problems';
+    return isTrait(t) ? P.traitLabel(t) : P.categoryLabel(t);
   }
 
-  window.Analysis = { analyze, focusPlan, nextFocus, nextDrill, mean, median, rolling, CAP_MS };
+  function targetHint(t) {
+    if (t === 'leaks') return 'A mix of the patterns you lose the most time on';
+    if (t === 'facts') return 'Replays the individual problems you’re slowest at';
+    return isTrait(t) ? P.traitHint(t) : P.categoryHint(t);
+  }
+
+  /* The category or operation a drill target draws from, for a fallback when nothing matching turns up. */
+  function fallback(t, settings) {
+    const scope = isTrait(t) ? P.traitParts(t).scope : t;
+    return scope.includes('.') ? P.generateIn(settings, scope) : P.generate(settings, scope);
+  }
+
+  function pickTrait(id, A, settings) {
+    if (Math.random() < 0.3) {
+      const slow = A.facts.filter((f) => f.traits.includes(id) && inRange(f.p, settings)).slice(0, 8);
+      if (slow.length) return replay(weightedPick(slow, slow.map((f) => f.score)));
+    }
+    return P.generateTrait(settings, id) || fallback(id, settings);
+  }
+
+  function pickTarget(t, A, settings) {
+    if (t === 'facts') {
+      const slow = A.facts.filter((f) => inRange(f.p, settings)).slice(0, 25);
+      return slow.length ? replay(weightedPick(slow, slow.map((f) => f.score))) : P.generate(settings);
+    }
+    if (t === 'leaks') {
+      const top = topLeaks(A);
+      return top.length ? pickTrait(weightedPick(top, top.map((l) => l.excess)).id, A, settings) : P.generate(settings);
+    }
+    return isTrait(t) ? pickTrait(t, A, settings) : pickInCategory(t, A, settings);
+  }
+
+  /* Avoids the last few problems where it can; a small pattern (e.g. 7 × _8 has ten problems) may have to repeat one,
+   * which beats drifting off the pattern. Never repeats the problem just answered. */
+  function nextDrill(t, A, settings, recentKeys) {
+    let repeat = null;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const p = pickTarget(t, A, settings);
+      const k = P.factKey(p);
+      if (!recentKeys.includes(k)) return p;
+      if (k !== recentKeys[0]) repeat = repeat || p;
+    }
+    return repeat || (t === 'facts' || t === 'leaks' ? P.generate(settings) : fallback(t, settings));
+  }
+
+  window.Analysis = { analyze, focusPlan, nextFocus, nextDrill, topLeaks, isLeak, targetLabel, targetHint, mean, median, rolling, CAP_MS };
 })();

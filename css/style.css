@@ -95,6 +95,7 @@ main { max-width: 960px; margin: 0 auto; padding: 0 24px 80px; }
   font-size: 13px; padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent);
 }
 .chip.muted { background: var(--line); color: var(--muted); }
+.tag { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--line); color: var(--muted); vertical-align: 1px; }
 .start {
   margin-top: 18px; border: 0; background: var(--fg); color: var(--bg); padding: 12px 44px; border-radius: 999px;
   font-size: 15px; font-weight: 500; cursor: pointer; transition: transform .12s, opacity .12s;

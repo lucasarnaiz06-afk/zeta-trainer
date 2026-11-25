@@ -156,12 +156,100 @@
     return generate(s, op);
   }
 
+  /* ---------- traits ----------
+   * Finer patterns than categories, used to find leaks that a category's average hides.
+   * An id is "<scope>/<kind><value>", where scope is a category ("mul.7") or a whole operation ("add").
+   *   mul.7/o8  7 × a number ending in 8        mul.7/b4  7 × a number in the 40s     mul/o8  any × ending in 8
+   *   div.7/o8  ÷ 7 with an answer ending in 8  div.7/b4  ÷ 7 with an answer in the 40s div/o8 any ÷, answer ends in 8
+   *   add/p78   ones digits are 7 and 8         add/s1 / add/s2  single-digit number first / second
+   *   sub/p37   _3 − _7 (ones borrow)           sub/c  answer under 10   sub/h  borrow across a hundred   sub/s1  − one digit
+   */
+  function traits(p) {
+    const [x, y] = operands(p);
+    if (p.op === 'mul' || p.op === 'div') {
+      const cat = `${p.op}.${x}`;
+      return [`${cat}/o${y % 10}`, `${cat}/b${bucketOf(y)}`, `${p.op}/o${y % 10}`];
+    }
+    const t = [];
+    if (p.op === 'add') {
+      const d = [x % 10, y % 10].sort((m, n) => m - n);
+      t.push(`add/p${d[0]}${d[1]}`);
+      if (x < 10 && y >= 10) t.push('add/s1');
+      else if (y < 10 && x >= 10) t.push('add/s2');
+      return t;
+    }
+    if (p.a % 10 < p.b % 10) t.push(`sub/p${p.a % 10}${p.b % 10}`);
+    if (p.ans < 10) t.push('sub/c');
+    if (p.a >= 100 && p.a % 100 < p.b % 100) t.push('sub/h');
+    if (p.b < 10) t.push('sub/s1');
+    return t;
+  }
+
+  function traitParts(id) {
+    const [scope, k] = id.split('/');
+    const [op, n] = scope.split('.');
+    return { scope, op, n: n ? +n : null, cat: n ? scope : null, kind: k[0], v: k.slice(1) };
+  }
+
+  function traitLabel(id) {
+    const { op, n, kind, v } = traitParts(id);
+    if (op === 'mul') {
+      if (kind === 'o') return n ? `× ${n}, ending in ${v}` : `× numbers ending in ${v}`;
+      return `× ${n}, ${BUCKETS[+v]}`;
+    }
+    if (op === 'div') {
+      if (kind === 'o') return n ? `÷ ${n}, answer ends in ${v}` : `÷ answers ending in ${v}`;
+      return `÷ ${n}, answer ${BUCKETS[+v]}`;
+    }
+    if (op === 'add') {
+      if (kind === 'p') return `+ ones digits ${v[0]} & ${v[1]}`;
+      return kind === 's' && v === '1' ? '+ single digit first' : '+ single digit second';
+    }
+    if (kind === 'p') return `− ending in ${v[0]} minus ending in ${v[1]}`;
+    return { c: '− close numbers', h: '− borrowing across 100', s: '− a single digit' }[kind] || id;
+  }
+
+  function traitHint(id) {
+    const { op, n, kind, v } = traitParts(id);
+    const d = +v;
+    if (op === 'mul') {
+      if (kind === 'o') return n ? `e.g. ${n} × ${30 + d}, ${n} × ${70 + d}` : `Any factor, e.g. 7 × ${40 + d}`;
+      return d === 0 ? `${n} × 2 to ${n} × 9` : d === 9 ? `${n} × 90 to ${n} × 100` : `${n} × ${d * 10} to ${n} × ${d * 10 + 9}`;
+    }
+    if (op === 'div') {
+      if (kind === 'o') return n ? `e.g. ${n * (30 + d)} ÷ ${n} = ${30 + d}` : `Any divisor, e.g. ${7 * (40 + d)} ÷ 7 = ${40 + d}`;
+      const lo = d === 0 ? 2 : d * 10;
+      return `e.g. ${n * (lo + 3)} ÷ ${n} = ${lo + 3}`;
+    }
+    if (op === 'add') {
+      if (kind === 'p') return `e.g. ${40 + +v[0]} + ${30 + +v[1]}`;
+      return v === '1' ? 'e.g. 7 + 86' : 'e.g. 86 + 7';
+    }
+    if (kind === 'p') return `e.g. ${80 + +v[0]} − ${40 + +v[1]}`;
+    return { c: 'Answer under 10, e.g. 83 − 76', h: 'e.g. 132 − 47', s: 'e.g. 83 − 7' }[kind] || '';
+  }
+
+  /* A problem from `scope` (category or operation) that passes `pred`, or null if none turns up. */
+  function generateWhere(s, scope, pred, tries = 3000) {
+    const op = scope.split('.')[0];
+    const isCat = scope.includes('.');
+    for (let i = 0; i < tries; i++) {
+      const p = isCat && (op === 'mul' || op === 'div') ? generateIn(s, scope) : generate(s, op);
+      if ((!isCat || category(p) === scope) && pred(p)) return p;
+    }
+    return null;
+  }
+  function generateTrait(s, id, cat) {
+    return generateWhere(s, cat || traitParts(id).scope, (p) => traits(p).includes(id));
+  }
+
   function factKey(p) { return `${p.op}|${p.a}|${p.b}`; }
   function format(p) { return `${p.a} ${SYMBOL[p.op]} ${p.b}`; }
 
   window.Problems = {
     OPS, SYMBOL, OP_NAME, DEFAULTS, BUCKETS,
-    clone, randInt, isStandard, enabledOps, make, operands, generate, generateIn,
+    clone, randInt, isStandard, enabledOps, make, operands, generate, generateIn, generateWhere, generateTrait,
     category, categoryLabel, categoryHint, categoriesFor, bucketOf, factKey, format,
+    traits, traitParts, traitLabel, traitHint,
   };
 })();
